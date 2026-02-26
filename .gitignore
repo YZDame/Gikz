@@ -1,0 +1,8 @@
+node_modules/
+*.log
+*.aux
+*.synctex*
+*.toc
+*.pdf
+*.gz
+.DS_Store

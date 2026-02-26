@@ -1,0 +1,31 @@
+{
+  "name": "gikz",
+  "version": "1.0.0",
+  "description": "Clean GeoGebra TikZ exports into concise, readable LaTeX code",
+  "main": "gikz.js",
+  "bin": {
+    "gikz": "./gikz.js"
+  },
+  "scripts": {
+    "start": "node gikz.js"
+  },
+  "keywords": [
+    "geogebra",
+    "tikz",
+    "latex",
+    "code-cleaner",
+    "cli"
+  ],
+  "author": "",
+  "license": "GPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YOUR_USERNAME/gikz.git"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "files": [
+    "gikz.js"
+  ]
+}
