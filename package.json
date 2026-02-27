@@ -16,11 +16,11 @@
     "code-cleaner",
     "cli"
   ],
-  "author": "",
+  "author": "YZDame",
   "license": "GPL-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR_USERNAME/gikz.git"
+    "url": "https://github.com/YZDame/gikz.git"
   },
   "engines": {
     "node": ">=14.0.0"

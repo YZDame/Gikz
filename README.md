@@ -27,7 +27,7 @@ npm install -g gikz
 npx gikz export.txt
 
 # Or clone and use
-git clone https://github.com/YOUR_USERNAME/gikz.git
+git clone https://github.com/YZDame/gikz.git
 cd gikz
 node gikz.js export.txt
 ```
