@@ -1,8 +1,15 @@
 # Gikz
 
+[![npm version](https://img.shields.io/npm/v/gikz)](https://www.npmjs.com/package/gikz)
+[![license](https://img.shields.io/npm/l/gikz)](LICENSE)
+[![node](https://img.shields.io/node/v/gikz)](https://nodejs.org)
+[![downloads](https://img.shields.io/npm/dm/gikz)](https://www.npmjs.com/package/gikz)
+
+**[中文文档](README_zh.md)**
+
 **Clean GeoGebra TikZ exports into concise, readable LaTeX code.**
 
-A zero-dependency Node.js CLI tool that transforms GeoGebra's verbose TikZ output into clean, hand-written-style code ready for your `.tex` files.
+A zero-dependency Node.js CLI tool that transforms GeoGebra's verbose TikZ output into clean, hand-written-style code ready for your `.tex` files. Also supports direct conversion from `.ggb` and `.xml` files.
 
 > Derived from [GGB-Tikz-Code-Filter](https://github.com/By990920/GGB-Tikz-Code-Filter) by [By990920](https://github.com/By990920). Licensed under GPL-2.0.
 
@@ -14,6 +21,7 @@ A zero-dependency Node.js CLI tool that transforms GeoGebra's verbose TikZ outpu
 - Smart label positioning based on point geometry
 - Converts line styles (`dash pattern=...` → `dashed`)
 - Supports: points, lines, circles, ellipses, arcs, sectors, angle marks, function plots, Bézier curves, text labels
+- **Direct conversion from `.ggb` (GeoGebra project) and `.xml` files**
 - Output as `tikzpicture` fragment or complete `standalone` document
 - Batch processing & stdin/stdout piping
 
@@ -35,17 +43,23 @@ node gikz.js export.txt
 ## Usage
 
 ```bash
-# Basic — output tikzpicture to terminal
+# Clean a TikZ export
 gikz export.txt
+
+# Convert a GeoGebra project file directly
+gikz figure.ggb
+
+# Convert a GeoGebra XML file
+gikz geogebra.xml
 
 # Standalone document — ready for pdflatex
 gikz -s export.txt
 
 # Write to file
-gikz -s -o clean.tex export.txt
+gikz -s -o clean.tex figure.ggb
 
 # Batch — multiple files to a directory
-gikz fig1.txt fig2.txt fig3.txt -o output/
+gikz fig1.ggb fig2.txt fig3.xml -o output/
 
 # Pipe from stdin
 cat export.txt | gikz -s > clean.tex
@@ -56,6 +70,14 @@ gikz --no-points --no-labels export.txt
 # Keep original coordinate precision
 gikz --no-round export.txt
 ```
+
+## Supported Input Formats
+
+| Format | Description |
+|---|---|
+| `.txt` / `.tex` | GeoGebra TikZ export (cleans verbose code) |
+| `.ggb` | GeoGebra project file (direct conversion) |
+| `.xml` | GeoGebra XML file (direct conversion) |
 
 ## Options
 
@@ -95,7 +117,7 @@ Gikz includes skill files for AI coding agents:
 | Claude Code | `CLAUDE.md` | Auto-detected in workspace |
 | OpenAI Codex | `AGENTS.md` | Auto-detected in workspace |
 
-These files teach the agent how to invoke `gikz` to clean TikZ code within your project.
+These files teach the agent how to invoke Gikz to clean TikZ code within your project.
 
 ## Requirements
 
