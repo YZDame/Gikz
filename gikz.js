@@ -27,6 +27,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 // ─── 工具函数 ───────────────────────────────────────────
 
@@ -571,6 +572,245 @@ function cleanTikZCode(code, opts = {}) {
     return result;
 }
 
+// ─── GeoGebra XML/GGB 转换 ──────────────────────────────
+
+function readGGB(buf) {
+    let eocdPos = -1;
+    for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+        if (buf.readUInt32LE(i) === 0x06054b50) { eocdPos = i; break; }
+    }
+    if (eocdPos === -1) throw new Error('无效的 GGB 文件（非 ZIP 格式）');
+
+    const cdEntries = buf.readUInt16LE(eocdPos + 10);
+    const cdOffset = buf.readUInt32LE(eocdPos + 16);
+    let pos = cdOffset;
+    for (let i = 0; i < cdEntries; i++) {
+        if (pos + 46 > buf.length || buf.readUInt32LE(pos) !== 0x02014b50) break;
+        const method   = buf.readUInt16LE(pos + 10);
+        const cSize    = buf.readUInt32LE(pos + 20);
+        const nameLen  = buf.readUInt16LE(pos + 28);
+        const extraLen = buf.readUInt16LE(pos + 30);
+        const cmtLen   = buf.readUInt16LE(pos + 32);
+        const locOff   = buf.readUInt32LE(pos + 42);
+        const name     = buf.toString('utf8', pos + 46, pos + 46 + nameLen);
+        if (name === 'geogebra.xml') {
+            const lnLen = buf.readUInt16LE(locOff + 26);
+            const leLen = buf.readUInt16LE(locOff + 28);
+            const data  = buf.slice(locOff + 30 + lnLen + leLen, locOff + 30 + lnLen + leLen + cSize);
+            if (method === 0) return data.toString('utf8');
+            if (method === 8) return zlib.inflateRawSync(data).toString('utf8');
+            throw new Error(`GGB: 不支持的压缩方法 ${method}`);
+        }
+        pos += 46 + nameLen + extraLen + cmtLen;
+    }
+    throw new Error('GGB 文件中未找到 geogebra.xml');
+}
+
+function convertGeoGebraXML(xmlStr, opts = {}) {
+    const shouldRound   = opts.round  !== false;
+    const includePoints = opts.points !== false;
+    const includeLabels = opts.labels !== false;
+    const rv = v => shouldRound ? roundToThreeDecimals(v) : v;
+    const de = s => s.replace(/&amp;/g, '&').replace(/&lt;/g, '<')
+                     .replace(/&gt;/g, '>').replace(/&apos;/g, "'").replace(/&quot;/g, '"');
+
+    const constrM = xmlStr.match(/<construction[^>]*>([\s\S]*?)<\/construction>/);
+    if (!constrM) throw new Error('XML 中未找到 construction 块');
+    const constr = constrM[1];
+
+    // 解析元素
+    const elements = new Map();
+    const elRe = /<element\s+type="([^"]+)"\s+label="([^"]+)">([\s\S]*?)<\/element>/g;
+    let m;
+    while ((m = elRe.exec(constr))) {
+        const label = de(m[2]), body = m[3];
+        const el = { type: m[1], label };
+
+        const showM = body.match(/<show\s+object="([^"]+)"\s+label="([^"]+)"/);
+        el.visible   = showM ? showM[1] === 'true' : false;
+        el.showLabel = showM ? showM[2] === 'true' : false;
+
+        const coordsM = body.match(/<coords\s+x="([^"]+)"\s+y="([^"]+)"\s+z="([^"]+)"/);
+        if (coordsM) {
+            const z = parseFloat(coordsM[3]) || 1;
+            el.x = parseFloat(coordsM[1]) / z;
+            el.y = parseFloat(coordsM[2]) / z;
+        }
+
+        const valM = body.match(/<value\s+val="([^"]+)"/);
+        if (valM) el.value = parseFloat(valM[1]);
+        const arcM = body.match(/<arcSize\s+val="([^"]+)"/);
+        if (arcM) el.arcSize = parseInt(arcM[1]);
+
+        const colM = body.match(/<objColor[^>]+alpha="([^"]+)"/);
+        if (colM) el.alpha = parseFloat(colM[1]);
+
+        const lineM = body.match(/<lineStyle\s+thickness="([^"]+)"\s+type="([^"]+)"/);
+        if (lineM) { el.lineThickness = parseInt(lineM[1]); el.lineType = parseInt(lineM[2]); }
+
+        if (el.x !== undefined && (isNaN(el.x) || isNaN(el.y))) continue;
+        elements.set(label, el);
+    }
+
+    // 解析命令
+    const commands = [];
+    const cmdRe = /<command\s+name="([^"]+)">([\s\S]*?)<\/command>/g;
+    while ((m = cmdRe.exec(constr))) {
+        const cmd = { name: m[1], inputs: [], outputs: [] };
+        const inM = m[2].match(/<input\s+([^/]*)\/>/); 
+        if (inM) { const r = /a(\d+)="([^"]+)"/g; let a; while ((a = r.exec(inM[1]))) cmd.inputs[+a[1]] = de(a[2]); }
+        const outM = m[2].match(/<output\s+([^/]*)\/>/); 
+        if (outM) { const r = /a(\d+)="([^"]+)"/g; let a; while ((a = r.exec(outM[1]))) cmd.outputs[+a[1]] = de(a[2]); }
+        commands.push(cmd);
+    }
+
+    const cmdByOut = new Map();
+    for (const cmd of commands)
+        for (const lbl of cmd.outputs) if (lbl) cmdByOut.set(lbl, cmd);
+
+    // 多边形边标签（排除独立绘制）
+    const polyEdges = new Set();
+    for (const cmd of commands) {
+        if (cmd.name === 'Polygon')
+            for (let i = 1; i < cmd.outputs.length; i++) if (cmd.outputs[i]) polyEdges.add(cmd.outputs[i]);
+    }
+
+    // 收集可见元素
+    const refPts = new Set();
+    const lsName = t => { switch(t){ case 10: case 15: return 'dashed'; case 20: return 'dotted'; case 30: return 'dash dot'; default: return ''; } };
+
+    // 线段
+    const segs = [];
+    for (const [label, el] of elements) {
+        if (!el.visible || el.type !== 'segment' || polyEdges.has(label)) continue;
+        const cmd = cmdByOut.get(label);
+        if (cmd && cmd.name === 'Segment' && cmd.inputs[0] && cmd.inputs[1]) {
+            segs.push({ from: cmd.inputs[0], to: cmd.inputs[1], ls: lsName(el.lineType || 0) });
+            refPts.add(cmd.inputs[0]); refPts.add(cmd.inputs[1]);
+        }
+    }
+
+    // 圆
+    const circs = [];
+    for (const [label, el] of elements) {
+        if (!el.visible || el.type !== 'conic') continue;
+        const cmd = cmdByOut.get(label);
+        if (cmd && cmd.name === 'Circle') {
+            const cEl = elements.get(cmd.inputs[0]), tEl = elements.get(cmd.inputs[1]);
+            if (cEl && tEl && cEl.x !== undefined && tEl.x !== undefined) {
+                const dx = tEl.x - cEl.x, dy = tEl.y - cEl.y;
+                circs.push({ center: cmd.inputs[0], radius: rv(Math.sqrt(dx * dx + dy * dy)) });
+                refPts.add(cmd.inputs[0]);
+            }
+        }
+    }
+
+    // 多边形
+    const polys = [];
+    for (const [label, el] of elements) {
+        if (!el.visible || el.type !== 'polygon') continue;
+        const cmd = cmdByOut.get(label);
+        if (cmd && cmd.name === 'Polygon') {
+            const verts = [];
+            for (let i = 0; cmd.inputs[i]; i++) { verts.push(cmd.inputs[i]); refPts.add(cmd.inputs[i]); }
+            polys.push({ vertices: verts, alpha: el.alpha || 0 });
+        }
+    }
+
+    // 角度
+    const angs = [];
+    for (const [label, el] of elements) {
+        if (!el.visible || el.type !== 'angle') continue;
+        const cmd = cmdByOut.get(label);
+        if (cmd && cmd.name === 'Angle') {
+            angs.push({ ptA: cmd.inputs[0], vertex: cmd.inputs[1], ptC: cmd.inputs[2], value: el.value });
+            refPts.add(cmd.inputs[0]); refPts.add(cmd.inputs[1]); refPts.add(cmd.inputs[2]);
+        }
+    }
+
+    for (const [label, el] of elements)
+        if (el.type === 'point' && (el.visible || el.showLabel)) refPts.add(label);
+
+    const coords = [];
+    for (const label of refPts) {
+        const el = elements.get(label);
+        if (el && el.type === 'point' && el.x !== undefined) coords.push({ label, x: rv(el.x), y: rv(el.y) });
+    }
+    coords.sort((a, b) => a.label.localeCompare(b.label));
+
+    // 生成 TikZ
+    let out = '\\begin{tikzpicture}[scale=1]\n';
+
+    if (coords.length > 0) {
+        out += '  % 坐标点定义\n';
+        for (const c of coords) out += `  \\coordinate (${c.label}) at (${c.x},${c.y});\n`;
+        out += '\n';
+    }
+
+    out += '  % 几何元素\n';
+
+    if (angs.length > 0) {
+        for (const ang of angs) {
+            const vEl = elements.get(ang.vertex), aEl = elements.get(ang.ptA), cEl = elements.get(ang.ptC);
+            if (!vEl || !aEl || !cEl) continue;
+            let sa = rv(Math.atan2(aEl.y - vEl.y, aEl.x - vEl.x) * 180 / Math.PI);
+            let ea = rv(Math.atan2(cEl.y - vEl.y, cEl.x - vEl.x) * 180 / Math.PI);
+            if (ea <= sa) ea += 360;
+            out += `  \\fill[green!10] (${ang.vertex}) -- ++(${sa}:0.4) arc (${sa}:${ea}:0.4) -- cycle;\n`;
+        }
+        out += '\n';
+    }
+
+    if (polys.length > 0) {
+        for (const p of polys) {
+            if (p.alpha > 0) {
+                const pth = p.vertices.map(v => `(${v})`).join(' -- ') + ' -- cycle';
+                out += `  \\fill[gray!20, fill opacity=${rv(p.alpha)}] ${pth};\n`;
+            }
+        }
+        out += '\n';
+    }
+
+    if (circs.length > 0) {
+        for (const c of circs) out += `  \\draw (${c.center}) circle (${c.radius});\n`;
+        out += '\n';
+    }
+
+    if (segs.length > 0) {
+        const drawn = new Set();
+        for (const s of segs) {
+            const k = [s.from, s.to].sort().join('|');
+            if (drawn.has(k)) continue;
+            drawn.add(k);
+            out += s.ls ? `  \\draw[${s.ls}] (${s.from}) -- (${s.to});\n` : `  \\draw (${s.from}) -- (${s.to});\n`;
+        }
+        out += '\n';
+    }
+
+    if (includePoints) {
+        const visPts = coords.filter(c => { const e = elements.get(c.label); return e && e.visible; });
+        if (visPts.length > 0) {
+            out += '  % 点标记\n';
+            for (const p of visPts) out += `  \\draw[fill=black] (${p.label}) circle (1pt);\n`;
+            out += '\n';
+        }
+    }
+
+    if (includeLabels) {
+        const lblPts = coords.filter(c => { const e = elements.get(c.label); return e && (e.visible || e.showLabel); });
+        if (lblPts.length > 0) {
+            out += '  % 点标签\n';
+            for (const p of lblPts) {
+                const pos = getSmartLabelPosition(p.x, p.y, coords);
+                out += `  \\node[${pos}] at (${p.label}) {$${p.label}$};\n`;
+            }
+        }
+    }
+
+    out += '\\end{tikzpicture}';
+    return out;
+}
+
 // ─── 包装函数：standalone / tikzonly ────────────────────
 
 function wrapStandalone(tikzCode) {
@@ -596,6 +836,11 @@ Gikz — GeoGebra TikZ 代码清洗工具
   node gikz.js [选项] <文件...>
   cat export.txt | node gikz.js [选项]
 
+支持的输入格式:
+  .txt/.tex    GeoGebra TikZ 导出文件（清洗模式）
+  .ggb         GeoGebra 工程文件（直接转换）
+  .xml         GeoGebra XML 文件（直接转换）
+
 选项:
   --standalone, -s      输出完整 standalone LaTeX 文档
   --tikzonly,   -t      仅输出 tikzpicture 片段（默认）
@@ -607,6 +852,7 @@ Gikz — GeoGebra TikZ 代码清洗工具
 
 示例:
   node gikz.js export.txt
+  node gikz.js figure.ggb
   node gikz.js -s -o clean.tex export.txt
   node gikz.js *.txt -o output/
   cat export.txt | node gikz.js -s
@@ -637,7 +883,15 @@ function parseArgs(argv) {
 }
 
 function processContent(content, opts) {
-    let tikz = cleanTikZCode(content, opts);
+    let tikz;
+    if (Buffer.isBuffer(content)) {
+        const xml = readGGB(content);
+        tikz = convertGeoGebraXML(xml, opts);
+    } else if (content.includes('<geogebra') && content.includes('<construction')) {
+        tikz = convertGeoGebraXML(content, opts);
+    } else {
+        tikz = cleanTikZCode(content, opts);
+    }
     if (opts.standalone) tikz = wrapStandalone(tikz);
     return tikz;
 }
@@ -680,7 +934,8 @@ function main() {
     let ok = 0, fail = 0;
     for (const file of opts.files) {
         try {
-            const content = fs.readFileSync(file, 'utf8');
+            const ext = path.extname(file).toLowerCase();
+            const content = ext === '.ggb' ? fs.readFileSync(file) : fs.readFileSync(file, 'utf8');
             const result = processContent(content, opts);
 
             if (opts.output) {
